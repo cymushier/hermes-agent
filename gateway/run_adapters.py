@@ -1011,8 +1011,13 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
             try:
                 connected += await self._start_one_profile_adapters(profile_name, profile_home, claimed)
             except MultiplexConfigError:
+                await self._unbind_secondary_profile_plugin_runtime(profile_home)
+                raise
+            except asyncio.CancelledError:
+                await self._unbind_secondary_profile_plugin_runtime(profile_home)
                 raise
             except Exception as e:
+                await self._unbind_secondary_profile_plugin_runtime(profile_home)
                 logger.error("Failed to start adapters for profile '%s': %s", profile_name, e, exc_info=True)
                 # Not acknowledged: the reconcile watcher retries a transiently-failed profile.
                 transient_failed.add(profile_name)
@@ -1070,43 +1075,68 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
                 from hermes_constants import get_hermes_home
                 publish_record(ROLE_GATEWAY, profiles=tuple(served), home=str(get_hermes_home()))
 
+    @staticmethod
+    async def _unbind_secondary_profile_plugin_runtime(profile_home: Path) -> None:
+        """Cancel one secondary manager's task generation while retaining its factories."""
+        from gateway.run import _profile_runtime_scope
+        from hermes_cli.plugins import get_plugin_manager
+
+        loop = asyncio.get_running_loop()
+        with _profile_runtime_scope(profile_home, hydrate_secrets=False):
+            manager = get_plugin_manager()
+        await manager.unbind_runtime_loop(loop)
+
     async def _load_secondary_profile_config(self, profile_name: str, profile_home: Path):
         """Hydrate + enter ``profile_home``'s scope once; return its gateway config. Raises
         ``MultiplexConfigError`` (open dm/group policy). Port-binding platforms are NOT refused: the
         default profile owns the single shared listener and a secondary's port-binders are built in
-        shared-listener mode (``/p/<profile>/...``) by ``_start_one_profile_adapters``."""
+        shared-listener mode (``/p/<profile>/...``) by ``_start_one_profile_adapters``.
+
+        Once plugin runtime tasks are bound, every failure path unbinds them before escaping. This is
+        especially important for policy rejection: an approval observer must not retain this profile's
+        secret Context after the profile was refused service.
+        """
         from gateway.run import (
             MultiplexConfigError, _load_gateway_config,
             _own_policy_open_startup_violation, _profile_runtime_scope,
         )
         from gateway.config import load_gateway_config
         from hermes_cli.env_loader import hydrate_profile_secret_sources
-        # Hydrate external secret sources off-loop ONCE: sync hydration would stall every heartbeat.
-        await asyncio.to_thread(hydrate_profile_secret_sources, profile_home)
-        # A platform that left core for a catalog plugin is installed before discovery below.
-        from gateway.run_startup import recover_left_core_in
-        await asyncio.to_thread(recover_left_core_in, profile_home, hydrate_secrets=False)
-        with _profile_runtime_scope(profile_home, hydrate_secrets=False):
-            profile_runtime_cfg = _load_gateway_config()
-            from hermes_cli.plugins import discover_plugins, get_plugin_manager
-            discover_plugins()
-            plugin_manager = get_plugin_manager()
-            plugin_manager.bind_runtime_loop(asyncio.get_running_loop())
-            self._subscribe_plugin_rewire(plugin_manager, profile_name, profile_home)
-            # This profile's `hooks:` block: start() registered before any profile scope existed.
-            self._register_config_hooks(
-                "shell-hook/webhook registration failed for profile '%s'", profile_name, level=logging.WARNING,
-            )
-            profile_cfg = load_gateway_config()
-            violation = _own_policy_open_startup_violation(profile_cfg)
-        self._snapshot_profile_busy_modes(profile_name, profile_runtime_cfg)
-        if violation:
-            raise MultiplexConfigError(
-                f"Profile '{profile_name}' enables {violation}. "
-                "Enable GATEWAY_ALLOW_ALL_USERS or the platform allow-all flag "
-                "for that profile, or change dm_policy/group_policy away from 'open'."
-            )
-        return profile_cfg
+        plugin_manager = None
+        bound_loop = None
+        try:
+            # Hydrate external secret sources off-loop ONCE: sync hydration would stall every heartbeat.
+            await asyncio.to_thread(hydrate_profile_secret_sources, profile_home)
+            # A platform that left core for a catalog plugin is installed before discovery below.
+            from gateway.run_startup import recover_left_core_in
+            await asyncio.to_thread(recover_left_core_in, profile_home, hydrate_secrets=False)
+            with _profile_runtime_scope(profile_home, hydrate_secrets=False):
+                profile_runtime_cfg = _load_gateway_config()
+                from hermes_cli.plugins import discover_plugins, get_plugin_manager
+                discover_plugins()
+                plugin_manager = get_plugin_manager()
+                bound_loop = asyncio.get_running_loop()
+                plugin_manager.bind_runtime_loop(bound_loop)
+                self._subscribe_plugin_rewire(plugin_manager, profile_name, profile_home)
+                # This profile's `hooks:` block: start() registered before any profile scope existed.
+                self._register_config_hooks(
+                    "shell-hook/webhook registration failed for profile '%s'", profile_name,
+                    level=logging.WARNING,
+                )
+                profile_cfg = load_gateway_config()
+                violation = _own_policy_open_startup_violation(profile_cfg)
+                if violation:
+                    raise MultiplexConfigError(
+                        f"Profile '{profile_name}' enables {violation}. "
+                        "Enable GATEWAY_ALLOW_ALL_USERS or the platform allow-all flag "
+                        "for that profile, or change dm_policy/group_policy away from 'open'."
+                    )
+            self._snapshot_profile_busy_modes(profile_name, profile_runtime_cfg)
+            return profile_cfg
+        except BaseException:
+            if plugin_manager is not None and bound_loop is not None:
+                await plugin_manager.unbind_runtime_loop(bound_loop)
+            raise
 
     @staticmethod
     def _credential_claim_origin(profile_name: str, profile_home, platform: Platform, token: str) -> Optional[str]:
