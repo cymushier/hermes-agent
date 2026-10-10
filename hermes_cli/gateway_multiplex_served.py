@@ -109,8 +109,9 @@ def format_ingress_url_lines(urls: dict[str, str], indent: str = "  ") -> list[s
 def notify_multiplexer_profiles_changed(profile_name: str, *, timeout: float = 8.0) -> Optional[list[str]]:
     """Tell the live default multiplexer that ``profiles/`` changed (``profile_name`` was created or
     deleted) so it hot-serves / unroutes it now instead of at its next periodic rescan. Returns the
-    served-profile list the gateway answered with, or None when no multiplexer answered (no live default
-    gateway, single-profile gateway, or a gateway predating the verb). Never raises."""
+    served-profile list only after reconciliation settled, or None when no multiplexer answered (no
+    live default gateway, single-profile gateway, a gateway predating the verb, or a reconciliation
+    still pending). Never raises."""
     try:
         from hermes_constants import get_default_hermes_root
         from gateway.control_socket import rescan_gateway_profiles
@@ -120,7 +121,8 @@ def notify_multiplexer_profiles_changed(profile_name: str, *, timeout: float = 8
     except Exception:
         logger.debug("multiplexer rescan notification failed for %r", profile_name, exc_info=True)
         return None
-    if not isinstance(answer, dict) or answer.get("multiplex") is False:
+    if (not isinstance(answer, dict) or answer.get("multiplex") is False
+            or answer.get("pending") is True):
         return None
     served = answer.get("served_profiles")
     return [str(p) for p in served] if isinstance(served, list) else None
