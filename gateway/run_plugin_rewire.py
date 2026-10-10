@@ -104,9 +104,7 @@ def reload_plugins_verb(runner: Any, loop: asyncio.AbstractEventLoop) -> Callabl
                 return {"reloaded": False, "error": "home is not served by this gateway", "home": str(requested)}
             if profile_name == (getattr(runner, "_primary_profile_name", None) or "default"):
                 profile_name = None
-        scope = (_profile_runtime_scope(requested, hydrate_secrets=False) if profile_name
-                 else contextlib.nullcontext())
-        with scope:
+        with _profile_runtime_scope(requested, hydrate_secrets=False):
             discover_plugins(force=True)
             manager = get_plugin_manager()
             # A plugin that failed on a dependency this gateway booted without rides along, so the

@@ -20,6 +20,7 @@ from hermes_cli.plugins_ledger import PluginRegistration
 from hermes_cli.plugins_loader import _serialized_replacement
 from hermes_cli.plugins_manifest import PluginManifest
 from hermes_cli.plugins_registrars import register_scoped_provider, scoped_provider_registrar
+from hermes_cli.plugins_runtime_tasks import PluginContextRuntimeTasksMixin
 from hermes_cli.plugins_state import PluginState
 
 if TYPE_CHECKING:
@@ -34,7 +35,7 @@ def _facade():
     return facade
 
 
-class PluginContext(PluginCapabilityCtxMixin):
+class PluginContext(PluginCapabilityCtxMixin, PluginContextRuntimeTasksMixin):
     """Facade given to plugins so they can register tools and hooks."""
 
     def __init__(self, manifest: PluginManifest, manager: PluginManager):
@@ -229,81 +230,6 @@ class PluginContext(PluginCapabilityCtxMixin):
         """The cron run executing now (``cron.execution_identity.CronExecution``), else ``None``."""
         from cron.execution_identity import current_cron_execution
         return current_cron_execution()
-
-    def on_unload(self, callback: Callable[[], None]) -> PluginRegistration:
-        """Register a cleanup callback for unload: runs in reverse acquisition order interleaved
-        with registration teardown; exceptions are logged, never propagated."""
-        if not callable(callback):
-            raise TypeError("on_unload callback must be callable")
-        handle = self._track("on_unload", getattr(callback, "__name__", "callback"), callback)
-        _facade().logger.debug("Plugin %s registered on_unload callback", self.manifest.name)
-        return handle
-
-    def spawn_task(self, coro, *, name: Optional[str] = None) -> Any:
-        """Spawn host-loop-owned work from register() or runtime code.
-
-        The default loader calls register() on a deadline worker, so scheduling crosses threads.
-        Unload/force reload cancels the returned Task/Future and failures are logged. Synchronous
-        discovery has no lifecycle loop and rejects the request after closing the coroutine.
-        """
-        aio = _facade().asyncio
-        if not aio.iscoroutine(coro):
-            raise TypeError("spawn_task expects a coroutine")
-        with self._task_lifecycle_lock:
-            if self._load_abandoned:
-                coro.close()
-                raise RuntimeError("cannot spawn a background task after the plugin load was abandoned")
-            loop = self._task_loop
-            if loop is None:
-                try:
-                    loop = aio.get_running_loop()
-                except RuntimeError:
-                    coro.close()
-                    raise RuntimeError(
-                        "ctx.spawn_task requires a running host asyncio loop; "
-                        "synchronous plugin discovery cannot supervise background tasks"
-                    ) from None
-            if loop.is_closed() or not loop.is_running():
-                coro.close()
-                raise RuntimeError("ctx.spawn_task cannot use a stopped host asyncio loop")
-            task_name = name or f"plugin:{self.plugin_id}:task"
-            try:
-                current_loop = aio.get_running_loop()
-            except RuntimeError:
-                current_loop = None
-            try:
-                if loop is current_loop:
-                    task = loop.create_task(coro, name=task_name)
-                else:
-                    task = aio.run_coroutine_threadsafe(coro, loop)
-            except RuntimeError as exc:
-                coro.close()
-                raise RuntimeError(f"ctx.spawn_task could not schedule on the host asyncio loop: {exc}") from None
-
-            def _cancel_task() -> None:
-                if not task.done():
-                    task.cancel()
-
-            try:
-                handle = self._track("background_task", task_name, _cancel_task)
-            except BaseException:
-                task.cancel()
-                raise
-
-        def _task_done(completed) -> None:
-            try:
-                if not completed.cancelled() and (exc := completed.exception()) is not None:
-                    _facade().logger.error(
-                        "Plugin %s background task %s failed: %s",
-                        self.manifest.name, task_name, exc,
-                        exc_info=(type(exc), exc, exc.__traceback__),
-                    )
-            finally:
-                handle.dispose()
-
-        task.add_done_callback(_task_done)
-        _facade().logger.debug("Plugin %s spawned supervised task: %s", self.manifest.name, task_name)
-        return task
 
     def register_approval_transport(self, name: str, present_fn: Callable) -> None:
         """Register a human approval transport, inactive until ``security.approval.transport:
