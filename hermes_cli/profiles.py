@@ -21,6 +21,10 @@ from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_arc
 from hermes_cli import config_backend as _config_backend
 from hermes_cli.profiles_config import _migrate_profile_config_if_outdated
 from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS, SECRET_CACHE_STORES
+from hermes_cli.profiles_delete_gate import (
+    ProfileTeardownPending, multiplexer_served_profiles as _multiplexer_served_profiles,
+    notify_multiplexer as _notify_multiplexer, require_confirmed_profile_unserve,
+)
 from hermes_cli.profiles_remove import _rmtree_make_writable, _rmtree_with_retry, wait_profile_unowned
 from hermes_cli.profiles_export_scrub import (
     GATEWAY_CONNECTION_STORE_RE as _GATEWAY_CONNECTION_STORE_RE, GATEWAY_CONNECTION_STORES as _GATEWAY_CONNECTION_STORES,
@@ -1432,11 +1436,6 @@ def create_profile(
     return profile_dir
 
 
-def _notify_multiplexer(canon: str) -> None:
-    from hermes_cli.gateway_multiplex_served import notify_multiplexer_profiles_changed
-    notify_multiplexer_profiles_changed(canon)
-
-
 def _purge_identity(canon: str) -> bool:
     """Settle a deleted profile's durable identity (``profile_identity.purge_profile_identity``).
 
@@ -1720,6 +1719,16 @@ def delete_profile(name: str, yes: bool = False) -> Path:
             print("Cancelled.")
             return profile_dir
 
+    # A possible live owner must positively confirm teardown after the tombstone before identity or
+    # files are purged. Only a snapshot proving there was no live gateway allows offline deletion.
+    require_confirmed_profile_unserve(
+        canon,
+        profile_dir,
+        _multiplexer_served_profiles(),
+        _notify_multiplexer,
+        _multiplexer_served_profiles,
+    )
+
     # 1. Disable service (prevents auto-restart); drop the s6 slot on container (host no-op).
     _cleanup_gateway_service(canon, profile_dir)
     _maybe_unregister_gateway_service(canon)
@@ -1732,13 +1741,8 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     _stop_profile_backends(canon, profile_dir)
     _stop_bot_desktop(profile_dir)
 
-    # Tombstone before rmtree so a stale serve/logging mkdir cannot relist this name live.
-    mark_named_profile_deleted(profile_dir)
-    # The multiplexer sees the tombstone, stops this profile's adapters and releases its handles
-    # into the directory before we remove it. Identity settlement is a separate delete-only
-    # operation below: an ordinary unserve must preserve identity, because a rename's old name
-    # leaves the served set exactly like a deleted one does (#111926, delete side).
-    _notify_multiplexer(canon)
+    # Identity settlement is a separate delete-only operation: ordinary unserve preserves
+    # identity because a rename's old name leaves the served set exactly like deletion does.
     identity_settled = _purge_identity(canon)
 
     # The main serve process survives this deletion. Stop only this profile's MCP

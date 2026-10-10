@@ -11,6 +11,7 @@ import contextvars
 import inspect
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -178,8 +179,11 @@ class PluginRuntimeTasksMixin:
         manager under a fresh runtime/secret scope. The state transition is lock-atomic, repeated
         calls after detach are inert, and a supplied non-owner loop is rejected. Cancellation is
         awaited asynchronously on the owner loop (including when called from another thread) so the
-        gateway loop is never synchronously blocked.
+        gateway loop is never synchronously blocked. The timeout covers cross-thread dispatch as
+        well as settlement on the owner loop.
         """
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
         with self._runtime_task_lock:
             bound_loop = self._runtime_loop
             if bound_loop is None:
@@ -211,22 +215,71 @@ class PluginRuntimeTasksMixin:
         if not tasks:
             return
 
-        async def _cancel_and_wait() -> set[asyncio.Task]:
+        async def _cancel_and_wait(wait_timeout: float) -> set[asyncio.Task]:
             for task in tasks:
                 task.cancel()
-            _done, pending = await asyncio.wait(tasks, timeout=max(0.0, float(timeout)))
-            return pending
+            _done, pending_tasks = await asyncio.wait(
+                tasks, timeout=max(0.0, wait_timeout)
+            )
+            return pending_tasks
 
+        pending: set[asyncio.Task]
         try:
             try:
                 current_loop = asyncio.get_running_loop()
             except RuntimeError:  # pragma: no cover - async method always has a caller loop
                 current_loop = None
             if current_loop is bound_loop:
-                pending = await _cancel_and_wait()
+                pending = await _cancel_and_wait(deadline - time.monotonic())
             else:
-                cancellation = asyncio.run_coroutine_threadsafe(_cancel_and_wait(), bound_loop)
-                pending = await asyncio.wrap_future(cancellation)
+                # Construct the coroutine only after the owner loop dispatches this callback.
+                # run_coroutine_threadsafe creates it eagerly, leaking it if a stopped loop closes.
+                caller_loop = asyncio.get_running_loop()
+                settlement = caller_loop.create_future()
+
+                def _settle(outcome) -> None:
+                    if not settlement.done():
+                        settlement.set_result(outcome)
+
+                def _dispatch() -> None:
+                    cancellation = bound_loop.create_task(
+                        _cancel_and_wait(deadline - time.monotonic())
+                    )
+
+                    def _completed(completed: asyncio.Task) -> None:
+                        try:
+                            outcome = (completed.result(), None)
+                        except asyncio.CancelledError as exc:
+                            outcome = (None, exc)
+                        except Exception as exc:
+                            logger.debug(
+                                "Plugin runtime cancellation settlement failed",
+                                exc_info=(type(exc), exc, exc.__traceback__),
+                            )
+                            outcome = (None, exc)
+                        try:
+                            caller_loop.call_soon_threadsafe(_settle, outcome)
+                        except RuntimeError:
+                            pass  # The timed-out caller loop has already gone away.
+
+                    cancellation.add_done_callback(_completed)
+
+                try:
+                    bound_loop.call_soon_threadsafe(_dispatch)
+                except RuntimeError:
+                    pending = set(tasks)
+                else:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    try:
+                        outcome = await asyncio.wait_for(
+                            asyncio.shield(settlement), timeout=remaining
+                        )
+                    except TimeoutError:
+                        pending = set(tasks)
+                    else:
+                        pending, error = outcome
+                        if error is not None:
+                            raise error
         finally:
             with self._runtime_task_lock:
                 self._runtime_tasks_stopping = {

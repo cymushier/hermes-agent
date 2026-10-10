@@ -56,6 +56,22 @@ def test_probe_trusts_live_record_over_cli_side_config(served_root):
     assert named_profile_served_by_running_multiplexer("other") is False
 
 
+def test_profiles_changed_pending_response_is_not_teardown_confirmation(monkeypatch):
+    from hermes_cli import gateway_multiplex_served as served
+
+    monkeypatch.setattr(served, "live_default_gateway_pid", lambda: os.getpid())
+    monkeypatch.setattr(
+        "gateway.control_socket.rescan_gateway_profiles",
+        lambda *_args, **_kwargs: {
+            "multiplex": True,
+            "pending": True,
+            "served_profiles": ["default"],
+        },
+    )
+
+    assert served.notify_multiplexer_profiles_changed("worker") is None
+
+
 def test_probe_falls_back_to_config_only_without_recorded_key(served_root):
     from hermes_cli.gateway import named_profile_served_by_running_multiplexer
     (served_root / "gateway_state.json").write_text(json.dumps(

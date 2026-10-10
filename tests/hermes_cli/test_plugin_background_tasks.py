@@ -5,6 +5,7 @@ import contextvars
 import gc
 import logging
 import threading
+import time
 import warnings
 
 import pytest
@@ -424,3 +425,121 @@ async def test_cancellation_timeout_blocks_rebind_and_repeated_unbind_joins_stop
     await manager.unbind_runtime_loop(loop, timeout=1)
     manager.bind_runtime_loop(loop)
     await manager.unbind_runtime_loop(loop)
+
+
+@pytest.mark.asyncio
+async def test_cross_thread_unbind_times_out_when_owner_loop_stopped_before_dispatch():
+    manager = PluginManager()
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    async def worker():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    _context(manager).register_background_task("observer", worker)
+    owner_loop = asyncio.new_event_loop()
+    owner_thread = threading.Thread(target=owner_loop.run_forever, daemon=True)
+    owner_thread.start()
+    try:
+        async def bind_on_owner():
+            manager.bind_runtime_loop(owner_loop)
+            await asyncio.sleep(0)
+
+        asyncio.run_coroutine_threadsafe(bind_on_owner(), owner_loop).result(timeout=1)
+        assert await asyncio.to_thread(started.wait, 1)
+        owner_loop.call_soon_threadsafe(owner_loop.stop)
+        await asyncio.to_thread(owner_thread.join, 1)
+
+        began = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                manager.unbind_runtime_loop(owner_loop, timeout=0.05), timeout=2.5
+            )
+        elapsed = time.monotonic() - began
+
+        assert elapsed < 2.05, "dispatch to a stopped owner loop exceeded the teardown timeout"
+        assert manager._runtime_loop is None
+        assert len(manager._background_task_factories) == 1
+        with pytest.raises(RuntimeError, match="still stopping"):
+            manager.bind_runtime_loop(asyncio.get_running_loop())
+
+        owner_thread = threading.Thread(target=owner_loop.run_forever, daemon=True)
+        owner_thread.start()
+        assert await asyncio.to_thread(cancelled.wait, 1)
+        await manager.unbind_runtime_loop(owner_loop, timeout=1)
+    finally:
+        if not owner_loop.is_closed():
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            if owner_thread.is_alive():
+                await asyncio.to_thread(owner_thread.join, 1)
+            owner_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_cross_thread_unbind_times_out_if_owner_loop_stops_during_settlement():
+    manager = PluginManager()
+    first_started = threading.Event()
+    cancellation_seen = threading.Event()
+    release = asyncio.Event()
+    starts = []
+
+    async def worker():
+        generation = len(starts) + 1
+        starts.append(generation)
+        if generation == 1:
+            first_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if generation == 1:
+                cancellation_seen.set()
+                asyncio.get_running_loop().stop()
+                await release.wait()
+            raise
+
+    _context(manager).register_background_task("observer", worker)
+    owner_loop = asyncio.new_event_loop()
+    owner_thread = threading.Thread(target=owner_loop.run_forever, daemon=True)
+    owner_thread.start()
+    try:
+        async def bind_on_owner():
+            manager.bind_runtime_loop(owner_loop)
+            await asyncio.sleep(0)
+
+        asyncio.run_coroutine_threadsafe(bind_on_owner(), owner_loop).result(timeout=1)
+        assert await asyncio.to_thread(first_started.wait, 1)
+
+        began = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                manager.unbind_runtime_loop(owner_loop, timeout=0.05), timeout=2.5
+            )
+        elapsed = time.monotonic() - began
+
+        assert cancellation_seen.is_set()
+        assert elapsed < 2.05, "owner-loop settlement stall exceeded the teardown timeout"
+        with pytest.raises(RuntimeError, match="still stopping"):
+            manager.bind_runtime_loop(asyncio.get_running_loop())
+
+        owner_loop.call_soon_threadsafe(release.set)
+        owner_thread = threading.Thread(target=owner_loop.run_forever, daemon=True)
+        owner_thread.start()
+        await manager.unbind_runtime_loop(owner_loop, timeout=1)
+        owner_loop.call_soon_threadsafe(owner_loop.stop)
+        await asyncio.to_thread(owner_thread.join, 1)
+
+        manager.bind_runtime_loop(asyncio.get_running_loop())
+        await asyncio.sleep(0)
+        assert starts == [1, 2]
+        await manager.unbind_runtime_loop(asyncio.get_running_loop(), timeout=1)
+    finally:
+        if not owner_loop.is_closed():
+            owner_loop.call_soon_threadsafe(owner_loop.stop)
+            if owner_thread.is_alive():
+                await asyncio.to_thread(owner_thread.join, 1)
+            owner_loop.close()
