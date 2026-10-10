@@ -288,7 +288,11 @@ class GatewayProfileReconcileMixin:
                 result["parked"].append(name)
                 config_parked.add(name)
                 continue
+            except asyncio.CancelledError:
+                await self._unbind_secondary_profile_plugin_runtime(current[name])
+                raise
             except Exception:
+                await self._unbind_secondary_profile_plugin_runtime(current[name])
                 logger.error("[MULTIPLEX] Failed to start adapters for profile '%s'", name, exc_info=True)
                 connected = 0
                 # A transient failure is not the deliberate park above: leave the signature
@@ -506,6 +510,10 @@ class GatewayProfileReconcileMixin:
         finally:
             retiring.discard(name)
         with _profile_runtime_scope(Path(home), hydrate_secrets=False):
+            # Runtime task factories outlive a serve generation, but their Tasks must not: they
+            # retain this profile's secret Context and may recreate brokers after adapters are gone.
+            from hermes_cli.plugins import get_plugin_manager
+            await get_plugin_manager().unbind_runtime_loop(asyncio.get_running_loop())
             adapters = (getattr(self, "_profile_adapters", None) or {}).pop(name, None) or {}
             for platform, adapter in adapters.items():  # no await since the pop: each holds its bot until torn down
                 self._hold_secondary_claims(name, platform, adapter, self._adapter_claims(platform, adapter))
