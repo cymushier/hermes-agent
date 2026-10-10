@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import gateway.run  # noqa: F401 - load bootstrap before the per-test home I/O guard
 from gateway.config import PlatformConfig, Platform
 from gateway.run_plugin_rewire import GatewayPluginRewireMixin
 from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest, discover_plugins, get_plugin_manager

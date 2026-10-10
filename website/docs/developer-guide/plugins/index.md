@@ -300,6 +300,39 @@ from an isolated `HERMES_HOME`. Those tests load and invoke the plugin through
 `PluginManager`; they assert real registration and callback outcomes rather
 than internal symbol lists or source-code shape.
 
+### Runtime background tasks
+
+Use `ctx.register_background_task(name, factory) -> PluginRegistration` for a long-lived async
+observer, poller, or consumer owned by the plugin:
+
+```python
+def register(ctx):
+    async def observe():
+        while True:
+            await collect_one_event()
+
+    ctx.register_background_task("observer", observe)
+```
+
+`factory` is a zero-argument callable and **must return a coroutine when Hermes invokes it**. The
+registration itself does not call the factory or create a coroutine, so ordinary synchronous CLI
+discovery stays inert and cannot emit an "unawaited coroutine" warning. The gateway binds each
+profile's `PluginManager` with `manager.bind_runtime_loop(loop)` after that profile's early discovery,
+while its runtime and secret scope are active. Binding requires a running loop, is idempotent for the
+same loop, rejects a stopped or different loop, and starts every pending factory exactly once on that
+loop. This manager method is a host integration API; plugins call only `register_background_task`.
+
+A registration added after binding (including a force reload) starts immediately and inherits the
+registration call's `ContextVars`. A registration waiting at initial bind inherits the bind call's
+profile context. Unload, disable, removal, and force reload remove a pending factory and cancel its
+running task before a replacement generation starts. Uncaught task/factory failures are logged at
+error level. Duplicate `(plugin, name)` registrations and scheduling/loop ownership failures raise;
+Hermes does not silently fall back to a private loop or platform-handler lifecycle.
+
+`ctx.spawn_task(coro, name=...)` remains available for code that is already executing under a running
+host loop. Do not call it from synchronous `register(ctx)`: creating the coroutine first is precisely
+the lifecycle gap that `register_background_task` avoids.
+
 ### Sep 2026 module decomposition: old import paths removed
 
 Hermes's internals were split into `<stem>_<topic>` sibling modules in Sep 2026 (PR #102117). **Internal

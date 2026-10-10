@@ -1147,6 +1147,16 @@ class GatewayStartupMixin:
             logger.warning("relay adapter registration failed at gateway startup", exc_info=True)
         GatewayStartupMixin._register_launch_profile_config_hooks()
 
+    @staticmethod
+    def _bind_launch_profile_plugin_runtime() -> None:
+        """Start the launch profile's registered plugin tasks on the gateway loop under its scope."""
+        from gateway.run import _profile_runtime_scope
+        from hermes_constants import get_process_hermes_home
+        from hermes_cli.plugins import get_plugin_manager
+
+        with _profile_runtime_scope(get_process_hermes_home(), hydrate_secrets=False):
+            get_plugin_manager().bind_runtime_loop(asyncio.get_running_loop())
+
     def _start_relay_provision_retry(self) -> None:
         """Keep provisioning in the background when the boot attempt left the relay without
         credentials; cancelled with ``_background_tasks`` at shutdown. Never raises."""
@@ -1229,6 +1239,7 @@ class GatewayStartupMixin:
         """Plugins, relay, hooks, then crash/clean-exit recovery of processes and sessions."""
         from gateway.run import _hermes_home
         self._start_register_plugins_relay_hooks()
+        self._bind_launch_profile_plugin_runtime()
         self._start_relay_provision_retry()
         # Plugins that load later (force re-discovery, install/enable nudge) re-wire live adapters (#87770).
         with _log_suppressed(logging.WARNING, "plugin re-wire subscription failed", exc_info=True):
