@@ -8,7 +8,21 @@ Usage:
     hermes <cmd> --help        # Per-command help
 """
 
-# hermes_bootstrap must be the very first import — it sets up UTF-8 stdio on
+# The installer probes this exact capability before it may safely install a consumer. Keep the
+# fast path stdlib-only and ahead of bootstrap, profile, dotenv, secret-source, logging, and home
+# scaffolding so capability discovery has no credentials or filesystem side effects.
+import sys as _capability_sys
+
+if _capability_sys.argv[1:] == ["send", "--capabilities", "--json"]:
+    _capability_sys.stdout.write(
+        '{"schema":1,"telegram":{"ambiguity_safe_retry":true,'
+        '"structured_topic_provenance":true}}\n'
+    )
+    raise SystemExit(0)
+del _capability_sys
+
+# Except for the stdlib-only capability probe above, hermes_bootstrap must be the very first
+# import — it sets up UTF-8 stdio on
 # Windows (no-op on POSIX). Guarded: after a ``git pull`` / interrupted
 # ``hermes update`` the editable install's ``.pth`` may not list it yet; crashing
 # here would block ``hermes update``.

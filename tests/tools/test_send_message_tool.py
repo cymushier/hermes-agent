@@ -14,7 +14,7 @@ import pytest
 # or call _send_telegram need it; tests for other platforms don't but
 # keeping the whole file consistent is simpler.
 _HAS_TELEGRAM = pytest.importorskip("telegram", reason="python-telegram-bot not installed") is not None
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 
 
 @pytest.fixture(autouse=True)
@@ -801,21 +801,27 @@ class TestSendTelegramThreadIdMapping:
         bot = self._make_bot()
         _install_telegram_mock(monkeypatch, bot)
 
-        asyncio.run(_send_telegram("tok", "-1001234567890", "hello", thread_id="1"))
+        result = asyncio.run(_send_telegram("tok", "-1001234567890", "hello", thread_id="1"))
 
         bot.send_message.assert_awaited_once()
         kwargs = bot.send_message.await_args.kwargs
         assert "message_thread_id" not in kwargs
+        assert result["requested_thread_id"] == "1"
+        assert result["effective_thread_id"] == "1"
+        assert result["target_fallback"] is False
 
     def test_non_general_topic_thread_id_preserved(self, monkeypatch):
         """Real forum-topic thread ids (>1) still pass through as ints."""
         bot = self._make_bot()
         _install_telegram_mock(monkeypatch, bot)
 
-        asyncio.run(_send_telegram("tok", "-1001234567890", "hello", thread_id="17585"))
+        result = asyncio.run(_send_telegram("tok", "-1001234567890", "hello", thread_id="17585"))
 
         kwargs = bot.send_message.await_args.kwargs
         assert kwargs["message_thread_id"] == 17585
+        assert result["requested_thread_id"] == "17585"
+        assert result["effective_thread_id"] == "17585"
+        assert result["target_fallback"] is False
 
     def test_thread_not_found_retries_without_message_thread_id(self, monkeypatch):
         """When send_message raises "thread not found", retry without thread_id (#27012)."""
@@ -824,11 +830,11 @@ class TestSendTelegramThreadIdMapping:
 
         # First call raises thread-not-found, second succeeds
         bot.send_message = AsyncMock(side_effect=[
-            Exception("Bad Request: message thread not found"),
+            BadRequest("Message thread not found"),
             SimpleNamespace(message_id=2),
         ])
 
-        asyncio.run(
+        result = asyncio.run(
             _send_telegram("tok", "-1001234567890", "hello", thread_id="17585")
         )
 
@@ -839,13 +845,16 @@ class TestSendTelegramThreadIdMapping:
         # Second call (retry): should NOT include message_thread_id
         call2_kwargs = bot.send_message.await_args_list[1].kwargs
         assert "message_thread_id" not in call2_kwargs
+        assert result["requested_thread_id"] == "17585"
+        assert result["effective_thread_id"] is None
+        assert result["target_fallback"] is True
 
     def test_thread_not_found_for_media_retries_without_message_thread_id(self, monkeypatch, tmp_path):
         """Media send with stale thread_id retries without it (#27012)."""
         bot = self._make_bot()
         # Mock send_document to fail with thread-not-found, then succeed
         bot.send_document = AsyncMock(side_effect=[
-            Exception("Bad Request: message thread not found"),
+            BadRequest("Message thread not found"),
             SimpleNamespace(message_id=3),
         ])
         _install_telegram_mock(monkeypatch, bot)
@@ -854,7 +863,7 @@ class TestSendTelegramThreadIdMapping:
         test_file = tmp_path / "doc.txt"
         test_file.write_text("test content")
 
-        asyncio.run(
+        result = asyncio.run(
             _send_telegram(
                 "tok", "-1001234567890", "",
                 media_files=[(str(test_file), False)],
@@ -869,6 +878,90 @@ class TestSendTelegramThreadIdMapping:
         # Second call (retry): should NOT include message_thread_id
         call2_kwargs = bot.send_document.await_args_list[1].kwargs
         assert "message_thread_id" not in call2_kwargs
+        assert result["requested_thread_id"] == "17585"
+        assert result["effective_thread_id"] is None
+        assert result["target_fallback"] is True
+
+    def test_untyped_thread_not_found_text_never_drops_the_topic(self, monkeypatch):
+        """Transport text that merely mentions a missing thread is not a Bot API refusal."""
+        bot = self._make_bot()
+        bot.send_message = AsyncMock(side_effect=[Exception("Bad Request: message thread 429 not found")])
+        _install_telegram_mock(monkeypatch, bot)
+
+        with patch("asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            result = asyncio.run(_send_telegram("tok", "-1001234567890", "hello", thread_id="17585"))
+
+        assert "error" in result
+        assert bot.send_message.await_count == 1
+        sleep_mock.assert_not_awaited()
+
+    def test_multi_chunk_topic_success_attests_final_message_and_topic(self, monkeypatch):
+        bot = self._make_bot()
+        bot.send_message = AsyncMock(side_effect=[
+            SimpleNamespace(message_id=1), SimpleNamespace(message_id=2),
+        ])
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(
+            _send_telegram("tok", "-1001234567890", "x" * 5000, thread_id="17585")
+        )
+
+        assert bot.send_message.await_count == 2
+        assert all(
+            call.kwargs["message_thread_id"] == 17585
+            for call in bot.send_message.await_args_list
+        )
+        assert result["message_id"] == "2"
+        assert result["requested_thread_id"] == "17585"
+        assert result["effective_thread_id"] == "17585"
+        assert result["target_fallback"] is False
+
+    def test_first_chunk_fallback_marks_whole_delivery_and_later_chunks_root(self, monkeypatch):
+        bot = self._make_bot()
+        bot.send_message = AsyncMock(side_effect=[
+            BadRequest("Message thread not found"),
+            SimpleNamespace(message_id=2),
+            SimpleNamespace(message_id=3),
+        ])
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(
+            _send_telegram("tok", "-1001234567890", "x" * 5000, thread_id="17585")
+        )
+
+        assert bot.send_message.await_count == 3
+        assert bot.send_message.await_args_list[0].kwargs["message_thread_id"] == 17585
+        assert all(
+            "message_thread_id" not in call.kwargs
+            for call in bot.send_message.await_args_list[1:]
+        )
+        assert result["message_id"] == "3"
+        assert result["effective_thread_id"] is None
+        assert result["target_fallback"] is True
+
+    def test_mixed_text_and_media_fallback_marks_whole_delivery(self, monkeypatch, tmp_path):
+        bot = self._make_bot()
+        bot.send_document = AsyncMock(side_effect=[
+            BadRequest("Message thread not found"),
+            SimpleNamespace(message_id=3),
+            SimpleNamespace(message_id=4),
+        ])
+        _install_telegram_mock(monkeypatch, bot)
+        test_file = tmp_path / "doc.txt"
+        test_file.write_text("test content")
+        second_file = tmp_path / "doc-2.txt"
+        second_file.write_text("more content")
+
+        result = asyncio.run(_send_telegram(
+            "tok", "-1001234567890", "hello",
+            media_files=[(str(test_file), False), (str(second_file), False)], thread_id="17585",
+        ))
+
+        assert bot.send_message.await_args.kwargs["message_thread_id"] == 17585
+        assert bot.send_document.await_count == 3
+        assert result["message_id"] == "4"
+        assert result["effective_thread_id"] is None
+        assert result["target_fallback"] is True
 
 
 # ---------------------------------------------------------------------------
