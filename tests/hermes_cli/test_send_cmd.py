@@ -57,6 +57,75 @@ def fake_tool(monkeypatch):
 # Happy path
 # ---------------------------------------------------------------------------
 
+
+def test_console_capabilities_fast_path_does_not_create_hermes_home(tmp_path):
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    hermes = Path(sys.executable).with_name("hermes")
+    assert hermes.is_file(), f"console executable missing beside test interpreter: {hermes}"
+    absent_home = tmp_path / "absent-hermes-home"
+    cp = subprocess.run(
+        [str(hermes), "send", "--capabilities", "--json"],
+        text=True,
+        capture_output=True,
+        env={**os.environ, "HERMES_HOME": str(absent_home)},
+        timeout=30,
+        check=False,
+    )
+
+    assert cp.returncode == 0, cp.stderr
+    assert json.loads(cp.stdout) == {
+        "schema": 1,
+        "telegram": {
+            "ambiguity_safe_retry": True,
+            "structured_topic_provenance": True,
+        },
+    }
+    assert not absent_home.exists()
+
+
+def test_capabilities_json_is_versioned_and_side_effect_free(fake_tool, monkeypatch, capsys):
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: pytest.fail("must not load credentials"))
+
+    with pytest.raises(SystemExit) as exc:
+        send_cmd.cmd_send(_parse(["--capabilities", "--json"]))
+
+    assert exc.value.code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "schema": 1,
+        "telegram": {
+            "ambiguity_safe_retry": True,
+            "structured_topic_provenance": True,
+        },
+    }
+    assert fake_tool.calls == []
+
+
+def test_json_output_preserves_structured_topic_provenance(fake_tool, monkeypatch, capsys):
+    fake_tool.payload = {
+        "success": True,
+        "platform": "telegram",
+        "chat_id": "-10042",
+        "message_id": "1001",
+        "requested_thread_id": "73",
+        "effective_thread_id": "73",
+        "target_fallback": False,
+    }
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: None)
+
+    with pytest.raises(SystemExit) as exc:
+        send_cmd.cmd_send(_parse(["--to", "telegram:-10042:73", "--json", "done"]))
+
+    assert exc.value.code == 0
+    assert json.loads(capsys.readouterr().out) == fake_tool.payload
+    assert fake_tool.calls == [{
+        "action": "send", "target": "telegram:-10042:73", "message": "done",
+    }]
+
+
 @pytest.fixture
 def whatsapp_bridge(monkeypatch):
     """Route ``hermes send --to whatsapp:...`` through the real plugin standalone sender into a fake

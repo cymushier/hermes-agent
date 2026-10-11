@@ -10,6 +10,14 @@ def _load_optional_dependencies():
     return project["optional-dependencies"]
 
 
+def test_primary_unit_ci_installs_messaging_extra_for_send_regressions():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+    setup = workflow.split("- name: Set up locked Python and test dependencies", 1)[1]
+    setup = setup.split("- name: Check SQLite runs WAL", 1)[0]
+    assert '"messaging"' in setup
+
+
 def test_wake_dependencies_and_runtime_gate_agree_on_supported_targets():
     from packaging.markers import Marker, default_environment
     from packaging.requirements import Requirement

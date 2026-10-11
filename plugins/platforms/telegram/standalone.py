@@ -95,9 +95,14 @@ def _is_telegram_thread_not_found(error: Exception) -> bool:
     """Mirror of the gateway adapter's ``_is_thread_not_found_error``.
 
     Matches the gateway adapter's ``_is_thread_not_found_error`` for the standalone ``_send_telegram`` path
-    (issue #27012).
+    (issue #27012). Only an explicit Bot API ``BadRequest`` counts: transport text that merely
+    mentions a thread never triggers a resend to the chat root.
     """
-    return "thread not found" in str(error).lower()
+    try:
+        from telegram.error import BadRequest
+    except ImportError:
+        return False
+    return isinstance(error, BadRequest) and "thread not found" in str(error).lower()
 
 
 def _telegram_fallback_ips(extra):
@@ -177,7 +182,15 @@ def _is_telegram_parse_error(error) -> bool:
     return is_entity_parse_error(error)
 
 
-async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, text_kwargs):
+def _mark_target_fallback(delivery_provenance) -> None:
+    """Record that the requested topic was dropped and the send landed in the chat root."""
+    if delivery_provenance is not None:
+        delivery_provenance["effective_thread_id"] = None
+        delivery_provenance["target_fallback"] = True
+
+
+async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, text_kwargs,
+                                    delivery_provenance=None):
     """One text chunk with adapter-matching fallbacks: thread-not-found -> retry without
     ``message_thread_id`` (dropped from ``text_kwargs`` for later chunks too); parse failure
     -> plain text. A rejected HTML chunk (an unsupported tag beside supported ones) first
@@ -192,6 +205,7 @@ async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, t
         if _is_telegram_thread_not_found(md_error) and text_kwargs.get("message_thread_id") is not None:
             logger.warning("Thread %s not found in _send_telegram, retrying without message_thread_id",
                            text_kwargs.pop("message_thread_id"))
+            _mark_target_fallback(delivery_provenance)
             return await send(chunk, parse_mode)
         if not _is_telegram_parse_error(md_error):
             raise
@@ -207,7 +221,7 @@ async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, t
 
 
 async def _telegram_send_one_media(bot, chat_id, media_path, is_voice, *, caption, parse_mode, has_html,
-                                   thread_kwargs, force_document):
+                                   thread_kwargs, force_document, delivery_provenance=None):
     """Upload one file with adapter-matching fallbacks (thread-not-found -> no
     ``message_thread_id``; caption parse failure -> plain caption); retries re-seek the file."""
     ext = os.path.splitext(media_path)[1].lower()
@@ -244,6 +258,7 @@ async def _telegram_send_one_media(bot, chat_id, media_path, is_voice, *, captio
                 if _is_telegram_thread_not_found(media_err) and media_kwargs.get("message_thread_id"):
                     logger.warning("Thread %s not found for media send, retrying without message_thread_id",
                                    media_kwargs.pop("message_thread_id"))
+                    _mark_target_fallback(delivery_provenance)
                 elif media_kwargs.get("parse_mode") and is_entity_parse_error(media_err, ("parse", "caption")):
                     logger.warning("Caption parse failed for media send, retrying plain: %s",
                                    _sanitize_error_text(media_err))
@@ -352,6 +367,15 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         media_files = media_files or []
         thread_kwargs = {**_telegram_thread_kwargs(thread_id),
                          **notification_kwargs(resolve_notifications_mode(), notify)}
+        delivery_provenance = None
+        if thread_id is not None:
+            requested_thread_id = str(thread_id)
+            delivery_provenance = {
+                "requested_thread_id": requested_thread_id,
+                # Thread "1" is the logical General topic even though Bot API omits the kwarg.
+                "effective_thread_id": requested_thread_id,
+                "target_fallback": False,
+            }
         # disable_web_page_preview is only valid for send_message, not media sends.
         text_kwargs = {**thread_kwargs, **({"disable_web_page_preview": True} if disable_link_previews else {})}
         last_msg, warnings, _tg_caption = None, [], None
@@ -359,7 +383,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             rich = await send_rich_standalone(bot, {**(extra or {}), "disable_link_previews": disable_link_previews},
                                               chat_id, message, thread_id=thread_id, notify=notify)
             if rich is not None:
-                return (_success(chat_id, message_id=rich.message_id) if rich.success
+                return (_success(chat_id, message_id=rich.message_id, **(delivery_provenance or {})) if rich.success
                         else _error(f"Telegram send failed: {rich.error}"))
         # MEDIA caption rides on the bubble as its *formatted* caption; formatting can inflate a
         # raw <1024 string past Telegram's cap, so re-check in UTF-16 units.
@@ -377,7 +401,8 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 for chunk in chunks
             ]
         for chunk in chunks:
-            last_msg = await _telegram_send_text_chunk(bot, int_chat_id, chunk, send_parse_mode, _has_html, text_kwargs)
+            last_msg = await _telegram_send_text_chunk(bot, int_chat_id, chunk, send_parse_mode, _has_html, text_kwargs,
+                                                       delivery_provenance)
         if album := _telegram_album_paths(media_files, force_document, _tg_caption):
             result = await send_album_standalone(bot, extra or {}, chat_id, album, thread_id=thread_id, notify=notify)
             detail = result.raw_response or {}
@@ -407,14 +432,16 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             try:
                 last_msg = await _telegram_send_one_media(
                     bot, int_chat_id, media_path, is_voice, caption=_tg_caption, parse_mode=send_parse_mode,
-                    has_html=_has_html, thread_kwargs=thread_kwargs, force_document=force_document)
+                    has_html=_has_html, thread_kwargs=thread_kwargs, force_document=force_document,
+                    delivery_provenance=delivery_provenance)
             except Exception as e:
                 warnings.append(_sanitize_error_text(f"Failed to send media {media_path}: {e}"))
                 logger.error(warnings[-1])
         if last_msg is None:
             return {"error": _NO_DELIVERABLE, **({"warnings": warnings} if warnings else {})}
         return _success(chat_id, warnings, **({"message_id": str(last_msg.message_id)}
-                                                          if last_msg.message_id is not None else {}))
+                                                          if last_msg.message_id is not None else {}),
+                        **(delivery_provenance or {}))
     except ImportError:
         return {"error": "python-telegram-bot not installed. Run: "
                 f"{install_hint('telegram')}"}

@@ -192,8 +192,20 @@ def _load_hermes_env() -> None:
             target[key] = str(val)
 
 
+_SEND_CAPABILITIES = {
+    "schema": 1,
+    "telegram": {
+        "ambiguity_safe_retry": True,
+        "structured_topic_provenance": True,
+    },
+}
+
+
 def cmd_send(args: argparse.Namespace) -> None:
     """Entry point wired into the top-level argparse dispatcher."""
+    if getattr(args, "capabilities", False):
+        print(json.dumps(_SEND_CAPABILITIES, sort_keys=True, separators=(",", ":")))
+        sys.exit(0)
     _load_hermes_env()  # the downstream gateway config loader reads credentials from os.environ
     if getattr(args, "list_targets", False):  # --list short-circuits everything else
         # `hermes send --list telegram` lands "telegram" in the `message` positional.
@@ -258,6 +270,8 @@ _SEND_ARGUMENTS = (
         "bare phone numbers are normalized to JIDs. Include each matching @<number> near the start of the message text."))),
     (("-l", "--list"), dict(dest="list_targets", action="store_true", default=False,
                             help="List available targets. Optional positional filter: `hermes send --list telegram`.")),
+    (("--capabilities",), dict(action="store_true", default=False,
+                               help=argparse.SUPPRESS)),
     (("-q", "--quiet"), dict(action="store_true", default=False, help="Suppress stdout on success (exit code only).")),
     (("--json",), dict(action="store_true", default=False, help="Emit raw JSON result instead of human-readable output.")),
 )
