@@ -80,3 +80,11 @@ def test_auto_decompose_board_pin_stays_inside_the_tick(monkeypatch, tmp_path):
     assert asyncio.run(_to_thread_process_service(_dispatcher().auto_decompose_tick, 5)) == 1
     assert seen["tick"] == "clientb"
     assert seen["other"] == "work"
+
+
+def test_pr_maintenance_rotates_one_board_per_async_run(monkeypatch):
+    dispatcher = _dispatcher()
+    monkeypatch.setattr(dispatcher, "_board_slugs", lambda: ["alpha", "beta"])
+    assert dispatcher.next_pr_maintenance_board() == "alpha"
+    assert dispatcher.next_pr_maintenance_board() == "beta"
+    assert dispatcher.next_pr_maintenance_board() == "alpha"
