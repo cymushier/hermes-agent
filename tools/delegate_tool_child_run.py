@@ -674,6 +674,10 @@ def _build_result_entry(
         # A budget-exhausted child still returns a summary (status stays
         # "completed"), so the parent needs this explicit flag.
         "truncated": exit_reason == "max_iterations",
+        # Same signal under the vocabulary of ``sessions.last_turn_exit_reason``; with the child's
+        # session id the parent (or an operator) can tell a budget boundary from a failure and
+        # re-delegate the remainder with this summary instead of assuming the task finished.
+        "budget_exhausted": exit_reason == "max_iterations",
         "tokens": {
             "input": _num(getattr(child, "session_prompt_tokens", 0)),
             "output": _num(getattr(child, "session_completion_tokens", 0)),
@@ -685,6 +689,10 @@ def _build_result_entry(
         "_child_role": getattr(child, "_delegate_role", None),
         "_child_cost_usd": float(_cost or 0.0) if isinstance(_cost, (int, float)) else 0.0,
     }
+    if entry["budget_exhausted"]:
+        _child_sid = _str_or_none(getattr(child, "session_id", None))
+        if _child_sid:
+            entry["child_session_id"] = _child_sid
     # Model-visible per-delegation spend (unlike _child_cost_usd above).
     entry["cost_usd"] = round(entry["_child_cost_usd"], 6)
     entry["cost_status"] = _cost_status if isinstance(_cost_status, str) and _cost_status else "unknown"
