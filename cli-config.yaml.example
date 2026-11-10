@@ -1233,6 +1233,15 @@ agent:
   # Recommended: 20-30 for focused tasks, 50-100 for open exploration
   max_turns: 500
 
+  # Gateway sessions (Telegram, Discord, Desktop/TUI...): when a turn stops at
+  # max_turns, queue a visible "[budget-continuation n/N]" turn so long work keeps
+  # going without typing "continue". Resets on every real user message; never
+  # fires after an interrupt, a failure, a pending approval, or with an active /goal.
+  # auto_continue_on_budget:
+  #   enabled: false
+  #   max_continuations_per_session: 10
+  #   message: null
+
   # Inactivity timeout for gateway agent runs (seconds, 0 = unlimited).
   # The agent can run indefinitely when actively calling tools or receiving
   # API responses.  Only fires after the agent has been idle for this duration.

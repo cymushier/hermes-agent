@@ -337,23 +337,65 @@ class GatewayGoalsMixin:
         prompt = decision.get("continuation_prompt") or ""
         if not decision.get("should_continue") or not prompt or source is None:
             return
+        await self._enqueue_synthetic_continuation(source, prompt, "goal-continuation")
+
+    async def _enqueue_synthetic_continuation(
+        self, source: Any, prompt: str, producer: str, metadata: Optional[dict] = None,
+    ) -> None:
+        """Queue a synthetic continuation turn behind any real user message (goal / budget)."""
         if getattr(source, "platform", None) == Platform.LOCAL:
             # A local session's adapter FIFO has no reader: its turns are authority admissions.
             # Commit the continuation there, as main's TUI chained it after the turn.
             from gateway.session_automation import admit_route_wake
             try:
-                await admit_route_wake(self, self._delivery_adapter_for(source), source, prompt, "goal-continuation")
+                await admit_route_wake(self, self._delivery_adapter_for(source), source, prompt, producer, metadata)
             except Exception:  # health: allow BLE001 -- best-effort like the FIFO enqueue below; traceback logged
-                logger.debug("goal continuation: local admission failed", exc_info=True)
+                logger.debug("%s: local admission failed", producer, exc_info=True)
             return
         # Enqueue via the adapter's FIFO so a user message already in flight preempts naturally.
         try:
             adapter = self._delivery_adapter_for(source)
             _quick_key = self._session_key_for_source(source)
             if adapter and _quick_key:
-                self._enqueue_fifo(_quick_key, self._synthetic_prompt_event(source, prompt), adapter)
-        except Exception as exc:
-            logger.debug("goal continuation: enqueue failed: %s", exc)
+                event = self._synthetic_prompt_event(source, prompt)
+                if metadata:
+                    event.metadata.update(metadata)
+                self._enqueue_fifo(_quick_key, event, adapter)
+        except Exception:  # health: allow BLE001 -- best-effort enqueue, as before the extraction; traceback logged
+            logger.debug("%s: enqueue failed", producer, exc_info=True)
+
+    async def _post_turn_budget_continuation(
+        self, *, session_entry: Any, source: Any, event: Any, is_internal: bool, failed: bool,
+    ) -> None:
+        """``agent.auto_continue_on_budget``: queue one continuation after a budget-stopped turn."""
+        from gateway import budget_continuation as bc
+        cfg = await asyncio.to_thread(bc.load_config)
+        sid = getattr(session_entry, "session_id", None) or ""
+        continuation_turn = bc.is_continuation_event(event)
+        real_user_turn = not is_internal and not continuation_turn
+        if not sid or (not cfg.enabled and not real_user_turn):
+            return
+        await self._warm_goals_session_db("budget continuation")
+        from hermes_cli.goals import _get_session_db
+        db = await asyncio.to_thread(_get_session_db)
+        if db is None:
+            return
+        goal_active = False
+        with suppress(Exception):
+            from hermes_cli.goals import GoalManager
+            goal_active = bool(await asyncio.to_thread(lambda: GoalManager(session_id=sid).is_active()))
+        approval_pending = False
+        with suppress(Exception):
+            from tools.approval import has_blocking_approval
+            approval_pending = bool(has_blocking_approval(self._session_key_for_source(source)))
+        prompt = await asyncio.to_thread(
+            bc.decide, cfg, db=db, session_id=sid, real_user_turn=real_user_turn,
+            continuation_turn=continuation_turn, failed=failed, goal_active=goal_active,
+            approval_pending=approval_pending,
+        )
+        if prompt and source is not None:
+            logger.info("budget continuation: session %s queued %s", sid, prompt.split("]", 1)[0] + "]")
+            await self._enqueue_synthetic_continuation(source, prompt, bc.PRODUCER, {bc.PRODUCER: True})
 
     async def _run_post_turn_hooks(
         self, *, agent_result: Any, source: Any, is_internal: bool, event: Any = None,
@@ -384,6 +426,13 @@ class GatewayGoalsMixin:
                 await hook(session_entry=session_entry, source=source, final_response="" if failed else final_text)
             except Exception as exc:
                 logger.debug("%s hook failed: %s", label, exc)
+        try:
+            await self._post_turn_budget_continuation(
+                session_entry=session_entry, source=source, event=event, is_internal=is_internal,
+                failed=failed,
+            )
+        except Exception:  # health: allow BLE001 -- a hook failure must never fail the delivered turn; traceback logged
+            logger.debug("budget continuation hook failed", exc_info=True)
         await self._publish_local_control(source, only_if_present=True)
 
     async def _publish_local_control(self, source: Any, *, only_if_present: bool = False) -> None:
