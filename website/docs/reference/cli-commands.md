@@ -147,6 +147,7 @@ Common options:
 | `--base-url <url>` / `--api-key <key>` | Explicit OpenAI-compatible endpoint and launch-only key for `--provider custom`. The key is held in the running gateway's memory for this session and never written to disk. |
 | `--source <tag>` | Session source tag for filtering (default: `cli`; one-shot runs default to `oneshot`, which pickers hide). Use `tool` for third-party integrations that should not appear in user session lists. An explicit `--source` is always stored as given, even for a one-shot run launched from inside a TUI or Desktop session. |
 | `--max-turns <N>` | Maximum tool-calling iterations per conversation turn (default: 500, or `agent.max_turns` in config). |
+| `--continue-on-budget <N>` | One-shot (`-q`/`-Q`) runs: when a turn stops at the iteration budget, send up to N `[budget-continuation n/N]` turns in the same session instead of exiting. Also `HERMES_CONTINUE_ON_BUDGET=N`. Kanban workers are excluded. |
 
 Examples:
 

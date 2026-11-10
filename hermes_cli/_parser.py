@@ -308,6 +308,10 @@ def _build_chat_parser(subparsers) -> argparse.ArgumentParser:
         "budget so one hung call can't consume the run. Unset = off. "
         "Also configurable as agent.run_budget_seconds in config.yaml. "
         "Intended for one-shot/eval invocations with a hard ceiling."))
+    add("--continue-on-budget", type=int, default=None, metavar="N", dest="continue_on_budget", help=(
+        "One-shot (-q/-Q) runs: when a turn stops at the iteration budget, continue in the SAME "
+        "session up to N more turns instead of exiting (context is kept). Also "
+        "HERMES_CONTINUE_ON_BUDGET=N. Exit code 3 if the budget is still hit after N."))
     inherited(chat_parser, "--yolo", action="store_true", default=SUPPRESS,
               help="Bypass all dangerous command approval prompts (use at your own risk)")
     inherited(chat_parser, "--pass-session-id", action="store_true", default=SUPPRESS,

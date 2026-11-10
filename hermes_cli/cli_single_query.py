@@ -190,6 +190,7 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
     stranded receipt."""
     from cli import _emit_interrupted_session_end, _run_kanban_goal_loop_q, _single_query_exit_code, _sync_cli_session_id_from_agent
     from agent.interrupt_compat import _accepts_keyword
+    from agent.kanban_turn_recovery import kanban_task_id
     from agent.turn_author import take_turn_author_from_env
     from hermes_cli.quiet_single_query import (
         bind_quiet_session_key, continue_quiet_notify_completions, exit_single_query, quiet_notify_linger_seconds, take_turn_report_path, write_turn_report,
@@ -248,6 +249,14 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
                 reply=res.get("final_response", "") if isinstance(res, dict) else str(res),
             )
 
+        # --continue-on-budget N: a budget stop re-enters THIS session (context kept) up to N times.
+        _budget_cap = getattr(cli, "_continue_on_budget", 0) or 0
+        if _budget_cap and kanban_task_id() is None:
+            from hermes_cli.oneshot_budget_continuation import run_budget_continuations
+            run_budget_continuations(
+                _quiet_recover_turn, lambda: result, _budget_cap,
+                log=lambda msg: print(msg, file=sys.stderr, flush=True),
+            )
         _report_turn(result)
         if isinstance(result, dict) and not result.get("failed"):
             history = result.get("messages") or cli.conversation_history
@@ -483,6 +492,8 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
         )
         cli._seeded_first_message = _SeededQueryMessage(seeded_query, seeded_images)
         return cli.run()
+    from hermes_cli.oneshot_budget_continuation import take_continue_on_budget
+    cli._continue_on_budget = take_continue_on_budget(getattr(cli, "_continue_on_budget_flag", None))
     cli._single_query_mode = True  # agent waits the full MCP cold-start before its only tool snapshot
     # No PluginManager._cli_ref (#67597): the turn's plugin tools run in the gateway, and this process
     # loads no plugins (PLG-7).
@@ -571,6 +582,13 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
             lambda: getattr(cli, "_last_turn_result", None),
             emit=lambda msg: print(msg, file=sys.stderr, flush=True),
         )
+        _budget_cap = getattr(cli, "_continue_on_budget", 0) or 0
+        if _budget_cap and not os.environ.get("HERMES_KANBAN_TASK", "").strip():
+            from hermes_cli.oneshot_budget_continuation import run_budget_continuations
+            run_budget_continuations(
+                _nonquiet_recover_turn, lambda: getattr(cli, "_last_turn_result", None), _budget_cap,
+                log=lambda msg: print(msg, file=sys.stderr, flush=True),
+            )
         # Kanban goal_mode on the `-q` path: same judge loop as `-Q`, but each follow-up turn
         # runs through cli.chat so the worker log keeps its live tool feed (the dispatcher
         # used to force -Q here, which left goal_mode cards with a blank Worker log).

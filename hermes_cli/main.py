@@ -1669,7 +1669,7 @@ def cmd_chat(args):
         "toolsets": args.toolsets,
         "query": args.query,
         "oneshot": bool(getattr(args, "oneshot_exit", False)),
-        "run_budget": getattr(args, "run_budget", None),
+        "run_budget": getattr(args, "run_budget", None), "continue_on_budget": getattr(args, "continue_on_budget", None),
         "output_format": getattr(args, "output_format", "text"),
         "ignore_rules": getattr(args, "ignore_rules", False) or safe_mode,
         "ignore_user_config": getattr(args, "ignore_user_config", False) or safe_mode,

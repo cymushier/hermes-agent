@@ -1680,7 +1680,7 @@ def main(
     api_key: str | None = None,
     base_url: str | None = None,
     max_turns: int | None = None,
-    run_budget: float | None = None,
+    run_budget: float | None = None, continue_on_budget: int | None = None,
     verbose: Optional[bool] = None,
     quiet: bool = False,
     compact: bool = False,
@@ -1781,6 +1781,7 @@ def main(
     _install_single_query_signal_handlers(cli)
 
     if query or image:
+        cli._continue_on_budget_flag = continue_on_budget
         _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json=output_format == "stream-json")
         return
     cli.run()

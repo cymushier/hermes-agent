@@ -17,7 +17,7 @@ from hermes_cli.gateway_connection import RESUME_REFUSALS
 _UNSUPPORTED = (
     "image", "worktree", "w",
     "no_restore_cwd",
-    "run_budget", "verbose", "compact",
+    "run_budget", "verbose", "compact", "continue_on_budget",
 )
 _POLICY = ("model", "provider", "reasoning", "toolsets", "max_turns", "base_url", "ignore_rules", "api_key",
            "yolo", "safe_mode", "ignore_user_config", "skills", "checkpoints", "accept_hooks", "pass_session_id")
@@ -28,6 +28,7 @@ _RELOCATED = {
     "w": "`hermes --tui -w`",
     "no_restore_cwd": "`--in <dir>` (the gateway keeps the session's frozen cwd)",
     "run_budget": "`agent.run_budget_seconds` in config.yaml",
+    "continue_on_budget": "the classic one-shot `hermes chat --continue-on-budget 3` with -q/-Q (not with --format stream-json or --safe-mode)",
     "verbose": "`hermes logs --follow`, or `hermes chat --tui -v`",
     "compact": "`display.compact: true` in config.yaml",
     "create-if-missing without -c <name>": "`-c <name> --create-if-missing`",
