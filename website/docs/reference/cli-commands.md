@@ -194,8 +194,13 @@ completion signal; the process exit code matches its `exit_code`.
 When chat answers and exits (`-Q`, `chat --oneshot`, or a query with non-TTY
 stdio) the process exit code reports the turn's outcome, on both the quiet and
 the non-quiet path: `0` the turn completed; `1` it failed, stopped partway
-(`partial`), hit the iteration budget, or never ran (credentials / agent init
-failed); `130` it was interrupted. A Kanban dispatcher-spawned worker
+(`partial`), or never ran (credentials / agent init failed); `3` it stopped at
+the iteration budget (`agent.max_turns`) — a resumable boundary: resume the
+printed `session_id` (or use `--continue-on-budget`) to keep going; `130` it was
+interrupted. Kanban workers keep exit `1` for a budget stop. The reason the last
+turn ended is also persisted on the session row
+(`sessions.last_turn_exit_reason`: `completed`, `iteration_budget`, `timeout`,
+`interrupted`, `error`, `incomplete`). A Kanban dispatcher-spawned worker
 (`HERMES_KANBAN_TASK` set) whose turn failed only because the provider was
 rate-limited, overloaded, returning 5xx, timing out, or the account hit a
 billing/quota wall, exits

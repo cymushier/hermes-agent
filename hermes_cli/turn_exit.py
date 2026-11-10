@@ -12,6 +12,11 @@ TERMINAL_PROVIDER_REASONS = frozenset({
     "auth", "auth_permanent", "model_not_found", "ssl_cert_verification", "upstream_blocked",
 })
 
+# A one-shot turn that stopped at the iteration budget: resumable (send "continue" in the same
+# session), not a failure. Distinct from 1 so supervisors don't count it as a crash. Kanban
+# workers keep their dispatcher contract (the finalizer already books a timed_out outcome).
+BUDGET_EXHAUSTED_EXIT_CODE = 3
+
 
 def turn_exit_code(
     result, *, kanban_worker: bool, credentials_rate_limited: bool = False,
@@ -29,6 +34,10 @@ def turn_exit_code(
         return 1
     if result.get("interrupted"):
         return 130
+    if not kanban_worker:
+        from agent.turn_exit_status import is_budget_exhausted
+        if is_budget_exhausted(result):
+            return BUDGET_EXHAUSTED_EXIT_CODE
     if not (result.get("failed") or result.get("partial") or result.get("completed") is False):
         return 0
     if kanban_worker:

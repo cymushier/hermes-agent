@@ -195,6 +195,21 @@ def _resolve_budget_fallback(
     return final_response, _turn_exit_reason, preserved_verification_fallback, interrupted
 
 
+def _record_turn_exit(agent, result: dict) -> None:
+    """Stamp the coarse turn-exit category on the result and persist it on the session row,
+    so supervisors/cron/audits can tell an iteration-budget boundary from a crash without
+    heuristics. Skipped for persistence-disabled agents (ephemeral / no SessionDB)."""
+    from agent.turn_exit_status import classify_turn_exit
+    category = classify_turn_exit(result)
+    result["turn_exit_category"] = category
+    db = getattr(agent, "_session_db", None)
+    if db is None or getattr(agent, "_persist_disabled", False) or not getattr(agent, "session_id", None):
+        return
+    setter = getattr(db, "set_last_turn_exit", None)
+    if callable(setter):
+        setter(agent.session_id, category, str(result.get("turn_exit_reason") or ""))
+
+
 def _rollback_interrupted_preflight_display(agent, interrupted) -> None:
     """Roll back the preflight-seeded display count only when an interrupt wins before
     any provider response; compaction state (incl. ``-1``) stays with the real-usage
@@ -839,6 +854,7 @@ def finalize_turn(
         if failed:
             result["error"] = final_response or str(_turn_exit_reason)
         stamp_failure(result, _exit_failure.reason, _exit_failure.retryable)
+    _guarded_cleanup("record_turn_exit", lambda: _record_turn_exit(agent, result), _cleanup_errors, logger)
     # Cleanup failures are surfaced, but the response is returned either way (#8049).
     if _cleanup_errors:
         result["cleanup_errors"] = _cleanup_errors

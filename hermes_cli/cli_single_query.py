@@ -149,7 +149,8 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False,
                             credentials_terminal: bool = False) -> int:
     """Map a one-shot turn result onto a process exit code, for both `-q` and `-Q`.
 
-    0 only when the turn completed; 130 when it was interrupted; 1 when it failed, stopped
+    0 only when the turn completed; 130 when it was interrupted; 3 (BUDGET_EXHAUSTED_EXIT_CODE)
+    when a non-Kanban turn stopped at the iteration budget; 1 when it failed, stopped
     partway (`partial`, `completed: False`) or never ran at all (credentials / agent init
     failed, so ``result`` is not a dict). A Kanban worker (``HERMES_KANBAN_TASK`` set) that
     failed purely on a provider rate-limit / billing wall exits ``KANBAN_RATE_LIMIT_EXIT_CODE``

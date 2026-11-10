@@ -129,7 +129,7 @@ _BUDGET = {"completed": False, "failed": False, "interrupted": False, "partial":
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome,result,chat_code,z_code", [
-    ("completed", _BUDGET, 1, 2),  # --max-turns: settled 'completed' but the work did not finish
+    ("completed", _BUDGET, 3, 2),  # --max-turns: settled 'completed' but the work did not finish (3 = budget boundary)
     ("completed", {"completed": True, "final_response": "done"}, 0, 0),
     ("cancelled", {"interrupted": True, "final_response": ""}, 130, 130),
 ])
@@ -168,9 +168,9 @@ async def test_stream_json_result_record_reports_an_unfinished_turn(capsys):
 
     peer = _SettledPeer("completed", {**_BUDGET, "input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
     view = GatewayChatView(peer, {"stored_session_id": "stored"}, emitter=StreamJsonEmitter(model="m", session_id="stored"))
-    assert await asyncio.wait_for(view.run("query", oneshot=True), 2) == 1
+    assert await asyncio.wait_for(view.run("query", oneshot=True), 2) == 3
     record = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()][-1]
-    assert record["type"] == "result" and record["exit_code"] == 1, record
+    assert record["type"] == "result" and record["exit_code"] == 3, record
     assert record["tokens"]["total"] == 15 and record["text"] == _BUDGET["final_response"]
 
 
